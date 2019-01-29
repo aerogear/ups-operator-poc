@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ups-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: ups-operator
+  template:
+    metadata:
+      labels:
+        name: ups-operator
+    spec:
+      serviceAccountName: ups-operator
+      containers:
+        - name: ups-operator
+          # Replace this with the built image name
+          image: docker.io/weilee/ups-operator:v0.2
+          ports:
+          - containerPort: 60000
+            name: metrics
+          imagePullPolicy: Always
+          env:
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OPERATOR_NAME
+              value: "ups-operator"

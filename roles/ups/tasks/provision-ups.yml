@@ -1,0 +1,179 @@
+- name: UPS deployment
+  k8s:
+    state: present
+    definition:
+      kind: Deployment
+      apiVersion: apps/v1
+      metadata:
+        name: '{{ ups_deploymentconfig_name }}'
+        namespace: "{{ namespace }}"
+        labels:
+          app: ups
+          service: ups
+          name: ups
+          mobile: enabled
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: ups
+            service: ups
+        template:
+          metadata:
+            labels:
+              app: ups
+              service: ups
+          spec:
+            containers:
+            - name: ups
+              image: '{{ ups_image }}:{{ ups_image_tag }}'
+              env:
+              - name: POSTGRES_USER
+                valueFrom:
+                  secretKeyRef:
+                    name: '{{ postgres_secret_name }}'
+                    key: database-user
+              - name: POSTGRES_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: '{{ postgres_secret_name }}'
+                    key: database-password
+              - name: POSTGRES_DATABASE
+                valueFrom:
+                  secretKeyRef:
+                    name: '{{ postgres_secret_name }}'
+                    key: database-name
+              - name: POSTGRES_SERVICE_HOST
+                value: "{{ postgres_service_name }}"
+              - name: POSTGRES_SERVICE_PORT
+                value: "5432"
+              ports:
+              - name: ups
+                protocol: TCP
+                containerPort: 8080
+            - name: ups-oauth-proxy
+              image: '{{ proxy_image }}:{{ proxy_image_tag }}'
+              imagePullPolicy: IfNotPresent
+              ports:
+              - containerPort: '{{ ups_proxy_port }}'
+                name: public
+              args:
+              - --provider=openshift
+              - --openshift-service-account={{ proxy_serviceaccount_name }}
+              - --upstream=http://localhost:{{ ups_port }}
+              - >-
+                --openshift-sar={"namespace":"{{ namespace }}","resource":"deploymentconfigs","name":"ups","verb":"update"}
+              - --http-address=0.0.0.0:{{ ups_proxy_port }}
+              - --skip-auth-regex=/rest/sender,/rest/registry/device,/rest/prometheus/metrics,/rest/auth/config
+              - --https-address=
+              - --cookie-secret=SECRET
+            - name: ups-sync-service
+              image: '{{ ups_sidecar_image }}:{{ ups_sidecar_image_tag }}'
+              imagePullPolicy: IfNotPresent
+              env:
+              - name: NAMESPACE
+                value: "{{ namespace }}"
+
+- name: create UPS service
+  k8s:
+    state: present
+    definition:
+      kind: Service
+      apiVersion: v1
+      metadata:
+        name: '{{ ups_service_name }}'
+        namespace: '{{ namespace }}'
+        annotations:
+          org.aerogear.metrics/plain_endpoint: "/rest/prometheus/metrics"
+        labels:
+          app: ups
+          service: ups
+          mobile: enabled
+      spec:
+        selector:
+          app: ups
+          service: ups
+        ports:
+          - name: web
+            port: 80
+            targetPort: 8080
+  register: unifiedpush_service
+
+- name: create UPS Proxy
+  k8s:
+    state: present
+    definition:
+      kind: Service
+      apiVersion: v1
+      metadata:
+        name: '{{ ups_proxy_service_name }}'
+        namespace: '{{ namespace }}'
+        labels:
+          app: ups
+          service: ups-proxy
+      spec:
+        selector:
+          app: ups
+          service: ups
+        ports:
+          - name: web
+            port: 80
+            targetPort: '{{ ups_proxy_port }}'
+
+- name: create ups https route
+  k8s:
+    state: present
+    definition:
+      kind: Route
+      apiVersion: v1
+      metadata:
+        name: '{{ ups_route_name }}'
+        namespace: '{{ namespace }}'
+        labels:
+          app: ups
+          service: ups-proxy
+      spec:
+        to:
+          kind: Service
+          name: '{{ ups_proxy_service_name }}'
+        tls:
+          termination: edge
+  register: ups_route
+
+# We need to wait for the deployment to be ready before we can exit the ansible job
+- name: "Wait for all UPS containers to become ready"
+  shell: oc get pods --namespace={{ namespace }} --selector="app=ups" -o jsonpath='{.items[*].status.containerStatuses[?(@.ready==true)].ready}'| wc -w
+  register: ups_result
+  until: ups_result.stdout.find("3") != -1
+  retries: 30
+  delay: 5
+  
+# - name: "Create {{ namespace }} PushApplication on service host {{ unifiedpush_service.service.spec.cluster_ip }}"
+#   uri:
+#     url: "http://{{ unifiedpush_service.service.spec.cluster_ip }}/rest/applications"
+#     method: POST
+#     body: '{"name" : "{{ namespace }}", "description" :  "Push application for {{ namespace }}"}'
+#     validate_certs: no
+#     body_format: json
+#     status_code: 201
+#   retries: 30
+#   until: namespace_push_app.status == 201
+#   delay: 5
+#   register: namespace_push_app
+
+# This is currently needed until https://github.com/openshift/ansible-service-broker/issues/847 is resolved
+- name: Make the data available to be used in the binding
+  asb_encode_binding:
+    fields:
+      NAMESPACE: "{{ namespace }}"
+
+# - name: "Create ups secret yaml file"
+#   template:
+#     src: secret.yml.j2
+#     dest: /tmp/secret.yaml
+
+# - name: "Create UPS secret"
+#   shell: "oc create -f /tmp/secret.yaml -n {{ namespace }}"
+
+# - name: "Delete UPS Secret Template File"
+#   file: path=/tmp/secret.yaml state=absent

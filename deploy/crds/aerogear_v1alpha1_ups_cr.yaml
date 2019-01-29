@@ -1,0 +1,7 @@
+apiVersion: aerogear.org/v1alpha1
+kind: UPS
+metadata:
+  name: example-ups
+spec:
+  # Add fields here
+  size: 3

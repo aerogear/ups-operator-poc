@@ -1,0 +1,18 @@
+---
+- set_fact:
+    namespace: "{{ meta.namespace }}"
+  
+# tasks file for ups
+- name: "Create OAuth Proxy Serviceaccount yaml"
+  template:
+    src: oauth-proxy-sa.yml.j2
+    dest: /tmp/oauth-proxy-sa.yaml
+
+- name: "Create OAuth Proxy Serviceaccount"
+  shell: "oc create -f /tmp/oauth-proxy-sa.yaml -n {{ namespace }}"
+
+- name: "Delete OAuth proxy Template File"
+  file: path=/tmp/oauth-proxy-sa.yaml state=absent
+  
+- include_tasks: provision-database.yml 
+- include_tasks: provision-ups.yml

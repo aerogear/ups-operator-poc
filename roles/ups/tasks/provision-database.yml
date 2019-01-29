@@ -1,0 +1,134 @@
+- name: generate password
+  shell: head /dev/urandom | tr -dc A-Za-z0-9 | head -c 13 ; echo ''
+  register: gen_password
+
+- k8s:
+    state: present
+    definition:
+      kind: Secret
+      apiVersion: v1
+      metadata:
+        name: '{{ postgres_secret_name }}'
+        namespace: '{{ namespace }}'
+        annotations:
+          template.openshift.io/expose-username: "{.data['database-user']}"
+          template.openshift.io/expose-password: "{.data['database-password']}"
+          template.openshift.io/expose-database_name: "{.data['database-name']}"
+      stringData:
+        database-user: 'unifiedpush'
+        database-password: '{{ gen_password.stdout }}'
+        database-name: "{{ postgres_database_name }}"
+
+- k8s:
+    state: present
+    definition:
+      kind: Service
+      apiVersion: v1
+      metadata:  
+        name: '{{ postgres_service_name }}'
+        namespace: '{{ namespace }}'
+        annotations:
+          template.openshift.io/expose-uri: postgres://{.spec.clusterIP}:{.spec.ports[?(.name=="postgresql")].port}
+      spec:
+        ports:
+        - name: postgresql
+          protocol: TCP
+          port: 5432
+          targetPort: 5432
+        selector:
+          name: '{{ postgres_service_name }}'
+
+- k8s:
+    state: present
+    definition:
+      kind: PersistentVolumeClaim
+      version: v1
+      metadata:
+        name: '{{ postgres_pvc_name }}'
+        namespace: '{{ namespace }}'
+      spec:
+        accessModes: 
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: "1Gi"
+
+- k8s:
+    state: present
+    definition:
+      kind: Deployment
+      apiVersion: apps/v1
+      metadata:
+        name: '{{ postgres_deploymentconfig_name }}'
+        namespace: '{{ namespace }}'
+        labels:
+          app: '{{ ups_deploymentconfig_name }}' 
+          service: '{{ postgres_service_name }}'
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: '{{ ups_deploymentconfig_name }}'
+            service: '{{ postgres_service_name }}'
+        template:
+          metadata:
+            labels:
+              app: '{{ ups_deploymentconfig_name }}'
+              service: '{{ postgres_service_name }}'
+          spec:
+            containers:
+            - name: postgresql
+              image: '{{ postgres_image }}:{{ postgres_image_tag }}'
+              ports:
+              - containerPort: 5432
+                protocol: TCP
+              readinessProbe:
+                timeoutSeconds: 1
+                initialDelaySeconds: 5
+                exec:
+                  command:
+                  - "/bin/sh"
+                  - "-i"
+                  - "-c"
+                  - psql -h 127.0.0.1 -U $POSTGRESQL_USER -q -d $POSTGRESQL_DATABASE -c
+                    'SELECT 1'
+              livenessProbe:
+                timeoutSeconds: 1
+                initialDelaySeconds: 30
+                tcpSocket:
+                  port: 5432
+              env:
+              - name: POSTGRESQL_USER
+                valueFrom:
+                  secretKeyRef:
+                    name: '{{ postgres_secret_name }}'
+                    key: database-user
+              - name: POSTGRESQL_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: '{{ postgres_secret_name }}'
+                    key: database-password
+              - name: POSTGRESQL_DATABASE
+                valueFrom:
+                  secretKeyRef:
+                    name: '{{ postgres_secret_name }}'
+                    key: database-name
+              resources:
+                limits:
+                  memory: '512Mi'
+              volumeMounts:
+              - name: '{{ postgres_pvc_name }}-data'
+                mountPath: "/var/lib/pgsql/data"
+              terminationMessagePath: "/dev/termination-log"
+            volumes:
+            - name: '{{ postgres_pvc_name }}-data'
+              persistentVolumeClaim:
+                claimName: '{{ postgres_pvc_name }}'
+
+# Check the containers in the Postgres pod and make sure they are all ready
+- name: "Wait for all Postgres containers to become ready"
+  shell: oc get pods --namespace={{ namespace }} --selector="service={{ postgres_service_name }}" -o jsonpath='{.items[*].status.containerStatuses[?(@.ready==true)].ready}'| wc -w
+  register: postgresql_result
+  until: postgresql_result.stdout.find("1") != -1
+  retries: 30
+  delay: 5

@@ -1,0 +1,15 @@
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: ups.aerogear.org
+spec:
+  group: aerogear.org
+  names:
+    kind: UPS
+    listKind: UPSList
+    plural: ups
+    singular: ups
+  scope: Namespaced
+  version: v1alpha1
+  subresources:
+    status: {}
